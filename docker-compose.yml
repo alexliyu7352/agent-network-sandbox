@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  tproxy-gateway:
+    image: xjasonlyu/tun2socks:v2.5.2
+    container_name: tproxy-gateway
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    # 【新增】：在这里由 Docker 引擎代为注入内核参数
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.route_localnet=1
+      - net.ipv4.conf.default.route_localnet=1
+      - net.ipv4.conf.all.rp_filter=0
+      - net.ipv4.conf.default.rp_filter=0
+
+      # gateway 本身只做 IPv4。
+      # host proxy-safe.sh 会额外阻断当前 UID 的 IPv6 出网。
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+      - net.ipv6.conf.lo.disable_ipv6=1
+    environment:
+      - PROXY_PROTOCOL=socks5
+      - PROXY_PORT=1083 # 你的本地代理端口
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./entrypoint-gateway.sh:/entrypoint.sh:ro
+    #entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    # 这里我们重写 command，先安装 socat，然后执行原来的入口脚本
+    command: >
+      sh -c "
+      apk add --no-cache socat &&
+      /entrypoint.sh
+      "
+    restart: unless-stopped

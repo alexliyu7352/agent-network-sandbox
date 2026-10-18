@@ -28,11 +28,4 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./entrypoint-gateway.sh:/entrypoint.sh:ro
-    #entrypoint: ["/bin/sh", "/entrypoint.sh"]
-    # 这里我们重写 command，先安装 socat，然后执行原来的入口脚本
-    command: >
-      sh -c "
-      apk add --no-cache socat &&
-      /entrypoint.sh
-      "
     restart: unless-stopped

@@ -6,11 +6,17 @@ Route an AI agent's connections through a proxy you choose, reducing the chance 
 
 This edition requires an existing SOCKS5 proxy. The scripts send the agent's connections to that proxy while keeping access to your local files, development tools, and services.
 
-The goal is to expose fewer obvious proxy settings and TUN interfaces to routine telemetry, reducing the chance of the network being flagged as unusual. The maintainer reports several months of testing and stable everyday use.
+The goal is to expose fewer obvious proxy settings and TUN interfaces to routine telemetry, reducing the chance of the network being flagged as unusual. The maintainer has run Claude Code through this setup for several months and reports stable everyday operation.
 
 ## Why use this instead of a system-wide TUN or HTTP/HTTPS proxy settings?
 
-**The main benefit is that an agent can connect normally while exposing fewer common proxy clues to routine telemetry.** The operating system and a Docker container handle forwarding; the agent does not need to configure or operate a proxy itself.
+**The two main benefits are blocking direct fallback when the proxy fails and exposing fewer obvious proxy clues.** The operating system and a Docker container handle forwarding, so the agent can connect normally without configuring or operating a proxy itself.
+
+**Fail-closed means losing connectivity when the proxy or network fails, instead of bypassing the proxy and using the computer's real public exit IP.** Programs inside the sandbox should see failed, interrupted, or timed-out connections while the proxy is unavailable.
+
+This is a key difference from a system-wide TUN setup without properly configured disconnection protection. Some tools restore the original routes when stopping or reconnecting, which can allow direct traffic during that interval. Automatic reconnection alone does not protect traffic during reconnection. TUN tools with correctly configured disconnection protection can also operate fail-closed; check the actual configuration.
+
+**In this simple edition, direct-egress guards apply while the session rules remain active. Close the agent or application before exiting the shell.** See "Usage precautions and what to do" for other environment requirements and operating guidance.
 
 The three approaches differ in what the agent can readily see:
 
@@ -18,7 +24,7 @@ The three approaches differ in what the agent can readily see:
 - **System-wide TUN:** A visible TUN interface and related routes usually appear on the host computer.
 - **This project:** You do not need to give the agent a proxy address. The TUN interface is inside Docker, so listing the host's interfaces does not show that interface. Without the required permissions, the agent also cannot inspect the container through Docker commands or list iptables rules directly.
 
-Applications still open connections to their intended destinations, and the system forwards them in the background. This design aims to reduce false positives from routine telemetry that relies on obvious clues such as proxy settings or a TUN interface.
+Applications still address their intended destinations, and the system forwards connections in the background. Their connection workflow resembles direct access, while the actual public exit remains the proxy. This design aims to reduce false positives from routine telemetry that relies on obvious clues such as proxy settings or a TUN interface.
 
 It also suits cases where only the agent should use a proxy. For example, the agent can download files and run Python programs through the proxy while programs in your other terminals keep their usual network path.
 
@@ -26,6 +32,7 @@ You also spend less time configuring each tool the agent uses. Some tools read `
 
 | What matters | This project | System-wide TUN | HTTP/HTTPS proxy settings |
 | --- | --- | --- | --- |
+| Proxy or network failure | Active session rules block fallback through ordinary external interfaces. Close the agent or application before exiting the shell. | Without correct disconnection protection, restored routes may allow direct traffic during shutdown or reconnection; correctly protected tools can prevent this. | Proxy settings alone do not provide a system-level guard; direct retries depend on the application. |
 | Visible proxy clues | No proxy variables are required; the TUN is inside the container. Inspecting container settings and firewall rules requires appropriate permissions. | A TUN interface and related routes are usually visible on the host. | The proxy address may appear in settings, startup arguments, or environment variables. |
 | Which programs use the proxy | The agent started in the sandbox shell and programs it starts directly. | Usually covers the whole computer; exclusions need additional rules. | Depends on which programs read and honor the settings. |
 | Does each tool need proxy support? | Usually no; the system forwards connections. | Usually no; the system forwards connections. | Each program or library needs to support the configuration. |
@@ -186,13 +193,15 @@ However, it would also fail if your computer had no working IPv6 in the first pl
 
 ### 5. Exit when finished
 
-In the sandbox shell, enter:
+**Close the agent or application and stop any background tasks it left inside the sandbox before exiting the shell.**
+
+Automatic cleanup removes network restrictions before stopping remaining programs. First make sure those programs have finished, then enter the following in the sandbox shell:
 
 ```bash
 exit
 ```
 
-The script cleans up networking and stops programs still in that environment. **Background jobs started there are stopped too.**
+The script then cleans up this session's networking. Follow the order above instead of relying on shell exit to close programs that are still making connections.
 
 Back in the outer terminal, check for remaining session state with:
 
@@ -236,14 +245,18 @@ The script also handles the following:
 - **Redirect common hostname lookups.** DNS translates website names into IP addresses. Ordinary DNS queries sent directly by the agent are redirected to `1.1.1.1` through the same proxy path.
 - **Block external IPv6.** This helps prevent the agent from using the computer's original IPv6 connection while IPv4 goes through the proxy.
 - **Restrict local network access.** Selected private address ranges are blocked, while local services and the forwarding container remain reachable for development.
-- **Check outgoing connections.** While the restrictions are active, traffic intended for the forwarding container is dropped if it leaves through another interface. Exit-time cleanup and other limitations are covered in the known issues below.
+- **Block direct fallback on failure (fail-closed).** With the restrictions active, only local services and the designated Docker interface are allowed. An unavailable proxy should cause connection failures, while traffic attempting to leave through an ordinary external interface is dropped. In this simple edition, close applications before exiting the shell and check the forwarding environment as described below.
 - **Clean up on exit.** A background process checks whether you have exited, then removes settings and stops remaining programs.
 
 ## Limitations
 
 ### Local files and tools remain accessible
 
-The agent still runs on your computer. It can read local files, inspect some network information, and use tools its account is allowed to use. This project does not separately limit file access, memory use, or which programs can be launched.
+The agent still runs on your computer. It can read local files, inspect local IP addresses, interfaces and routes, and use tools its account is allowed to use. This project does not separately limit file access, memory use, or which programs can be launched.
+
+Distinguish two kinds of addresses: local addresses on the computer's interfaces, such as `192.168.x.x` or `10.x.x.x`, describe the local network. The public exit IP obtained through an external service should be the proxy's exit IP. Being able to inspect local interfaces and routes does not mean a connection through the sandbox reveals the computer's original public exit.
+
+The tool does not rewrite interface information or remove addresses already stored in files. If a public IP is configured directly on a host interface, that address also remains readable as local host information.
 
 Even under a normal account, an agent that can use sudo, manage Docker, or ask another local service to act for it may bypass restrictions. If work is handed to a service that is already running, do not assume that service's connections are covered too.
 
@@ -251,7 +264,7 @@ Even under a normal account, an agent that can use sudo, manage Docker, or ask a
 
 Some agents automatically send usage or device information, commonly called telemetry. This project changes where those connections go out; it does not remove their contents.
 
-If an agent uploads an account identifier, device ID, hostname, timezone, file contents, or local IP, a remote service may still recognize your environment. Check the agent's own privacy and telemetry settings separately.
+If an agent uploads an account identifier, device ID, hostname, timezone, file contents, or local IP, a remote service may still recognize the device or environment. These contents are separate from the connection's public source IP: traffic sent through the proxy still comes from the proxy's exit. Check the agent's own privacy and telemetry settings separately.
 
 Your proxy provider may also observe or record connections. SOCKS itself does not encrypt all traffic; encryption depends on the agent's connection protocol and the proxy service.
 
@@ -281,26 +294,39 @@ Your computer and the forwarding container have exceptions, so this list does no
 
 </details>
 
-## Known issues
+## Usage precautions and what to do
 
-The items below include operating precautions and risks inferred from reading the code that need checking in your environment. They do not mean these failures were reproduced during the maintainer's months of everyday use, but their possible effects still matter.
+Use the guidance below to avoid problems. Have an administrator check your environment before changing network settings; do not clear the computer's entire rule set.
 
-| Issue | What it means for you |
+| Precaution | Why it matters and what to do |
 | --- | --- |
-| Use `--cleanup` with care | It stops all sandboxes started by the current account, including active ones. It may also delete unrelated network settings and disrupt a VPN or other networking. |
-| Connections may go direct briefly during exit | Cleanup removes restrictions before stopping remaining programs. An agent or another program still running may connect directly during that short interval. |
-| Failed setup may leave settings behind | Some cleanup commands lack administrator privileges and may leave firewall rules in place. Check for leftovers after a startup failure. |
-| One setting is not restored | The script changes the host's `route_localnet` setting and does not restore its previous value on exit. |
-| Startup messages do not prove connectivity | The script does not confirm that the proxy is usable or that the cleanup process started successfully. Check the exit IP and inspect state after exiting. |
-| Different accounts may conflict | Allocation is coordinated within one account, but different accounts do not share that protection. |
-| The number of simultaneous sessions is limited | The scripts use system rule priorities `100–199`; positions already used by other software reduce availability. |
-| The container should have only one Docker network | Reading its address does not properly handle attachment to multiple Docker networks. |
-| Existing firewall settings may interact | Some allow rules are placed before existing rules. The container also does not fully block every unlisted connection. Check actual behavior if strict outbound control is required. |
-| Exit checks are limited | The scripts check the outgoing Docker network interface, without verifying each connection subsequently uses the intended container and proxy. |
-| The socat installation command does not run | The Compose command intended to install socat is not executed, and the forwarding path does not use it. It does not automatically bridge a remote proxy to the host. |
-| Full tests can affect networking | They call `--cleanup` with the issues above. Cleanup also runs as root and may miss sandboxes created by a normal account while still affecting other settings. |
+| Close the agent or application before exiting | Automatic cleanup removes network restrictions before stopping remaining programs. Close the agent or application, stop background tasks it left inside the sandbox, and only then use `exit` to leave the shell. |
+| Do not use `--cleanup` for routine exit | It stops all sandboxes under the current account and may affect unrelated networking. Normally follow the exit steps above. For leftovers, inspect `--status` first and have an administrator identify the rules to remove; do not run cleanup blindly when VPNs or other services are in use. |
+| Check failed startup before launching an agent | Some cleanup steps may leave rules behind. Run `./proxy_safe_final.sh --status`, identify state belonging to this tool, and have an administrator handle it. Do not flush global rules or delete another service's rules. |
+| Record settings first if full restoration is required | The script changes the Docker bridge's `route_localnet` setting without restoring it on exit. Record its original value before use, then have an administrator restore that value afterward rather than guessing. |
+| Verify the exit before launching an agent | Startup messages do not prove the proxy works. Check the public exit with the command above or a browser launched inside the sandbox, then start the agent. Inspect `--status` after exiting for leftover state. |
+| Start multiple sandboxes under one account | Allocation is coordinated within one account, but different accounts do not share that protection. Use multiple terminals under the same normal account, and avoid concurrent initialization or cleanup by different accounts. |
+| Close unused sessions when capacity is reached | The scripts share rule priorities `100–199`, which other software may also occupy. Close unused sandboxes normally; do not delete another program's rules to make space. |
+| Attach the forwarding container to one Docker network | Address detection does not properly handle multiple attached networks. Keep a single dedicated Docker network and do not attach additional networks to this container. |
+| Check compatibility with existing firewalls or VPNs | This tool inserts allow rules, and the container does not fully reject all unlisted traffic. If the host has important network policies, verify the normal exit and disconnection behavior in a test environment where interruption is acceptable before combining them. Connectivity alone is not enough. |
+| Verify the exit with real connections | Checking the outgoing Docker interface does not verify the full proxy path. Check the public IP, then follow the testing section for browser, UDP, and proxy-failure checks rather than relying only on interface or route output. |
+| Prepare a local entry point for a remote proxy | First provide a local SOCKS5 service reachable from Docker with UDP support using your own proxy software, then start this tool. |
+| Run full tests only on a machine where networking can be interrupted | Tests call `--cleanup` and may stop the gateway or affect unrelated networking. Close agents and all sandboxes on the test machine first; do not run the entire suite on your everyday work computer. |
 
 ## Testing
+
+### Check with a browser (GUI applications)
+
+GUI applications can also use the sandbox network. A browser provides a convenient visual check:
+
+1. Enter the sandbox from a terminal in your normal desktop account, then **launch the browser from inside the sandbox shell**.
+2. Fully close existing browser processes first, or use a separate profile and an independent instance supported by that browser. Opening a browser from the desktop, or handing a page to an existing process outside the sandbox, does not ensure that process is covered.
+3. Open [BrowserLeaks](https://browserleaks.com/) or [BrowserScan](https://www.browserscan.net/) and check public IP, WebRTC, DNS, timezone, and language results.
+4. **The public IP should be the proxy's exit. Any public IP shown by WebRTC should also be the proxy's exit, or no public result should be available.** A local private address alone does not indicate exposure of the original public exit. If the original public exit appears, stop using the setup and investigate.
+
+DNS tests may show resolver addresses, which normally differ from the proxy's exit IP. A difference alone does not prove a leak, and the browser's own encrypted DNS settings can affect the results. Changing the exit does not automatically change timezone, language, fonts, or other browser information. A proxy/VPN label alone also does not show that traffic bypassed the proxy; check the reported addresses.
+
+Only test disconnection where interrupted networking is acceptable: keep the sandbox and browser running, pause the proxy from outside, and make a new network request. The request should fail instead of using the original public exit. Cached or previously loaded pages do not demonstrate working connectivity. Browsing these sites checks the observed requests and does not replace failure testing or packet inspection.
 
 ### Check script syntax only
 
@@ -373,9 +399,11 @@ sudo docker exec tproxy-gateway ip route
 
 Seeing `tun0` or `gateway ready` still requires a real connection test to confirm the proxy works. A plain `ip route get` query does not by itself show the agent's actual exit path.
 
-**Is it normal for the agent to see local IP addresses?**
+**How do local IP addresses differ from the public exit IP?**
 
-Yes. It still runs on your computer and can read some local information. The script changes outgoing connections, without hiding every local detail. A remote service may learn those details if the agent uploads them.
+The agent can inspect local IP addresses, interfaces, and routes. Those details are separate from the public exit used for outgoing connections. **With the restrictions working and traffic following the proxy path, both the exit IP reported by an external lookup and the source IP seen by the remote service should be the proxy's exit IP.**
+
+For example, an interface showing `192.168.1.10` while a public-IP lookup reports the proxy's exit is normal; it does not mean the original public exit has leaked. Local host data is not rewritten, so file access and telemetry contents still need separate management.
 
 **Can I run `--cleanup` immediately if something remains after exit?**
 
